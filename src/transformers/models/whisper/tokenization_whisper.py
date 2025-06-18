@@ -26,6 +26,7 @@ import regex as re
 from ...tokenization_utils import AddedToken, PreTrainedTokenizer
 from ...utils import logging
 from .english_normalizer import BasicTextNormalizer, EnglishTextNormalizer
+from .orange_voice_normalizer import SenegalVoiceNormalizer
 
 
 VOCAB_FILES_NAMES = {
@@ -185,6 +186,7 @@ LANGUAGES = {
     "jw": "javanese",
     "su": "sundanese",
     "yue": "cantonese",
+    "wo" : "wolof"
 }
 
 # language code lookup by name, with a few language aliases
@@ -265,6 +267,7 @@ class WhisperTokenizer(PreTrainedTokenizer):
         language=None,
         task=None,
         predict_timestamps=False,
+        use_senegal_normalizer=False,
         **kwargs,
     ):
         bos_token = (
@@ -287,7 +290,11 @@ class WhisperTokenizer(PreTrainedTokenizer):
             if isinstance(pad_token, str)
             else pad_token
         )
-
+        self.use_senegal_normalizer = use_senegal_normalizer
+        
+        # Initialize Senegal normalizer if requested
+        if self.use_senegal_normalizer:
+            self.senegal_normalizer = SenegalVoiceNormalizer()
         with open(vocab_file, encoding="utf-8") as vocab_handle:
             self.encoder = json.load(vocab_handle)
         self.decoder = {v: k for k, v in self.encoder.items()}
@@ -476,17 +483,6 @@ class WhisperTokenizer(PreTrainedTokenizer):
             return prefix_ones + ([0] * len(token_ids_0)) + suffix_ones
         return prefix_ones + ([0] * len(token_ids_0)) + ([0] * len(token_ids_1)) + suffix_ones
 
-    # Copied from transformers.models.gpt2.tokenization_gpt2.GPT2Tokenizer._tokenize with GPT2 -> Whisper
-    def _tokenize(self, text):
-        """Tokenize a string."""
-        bpe_tokens = []
-        for token in re.findall(self.pat, text):
-            token = "".join(
-                self.byte_encoder[b] for b in token.encode("utf-8")
-            )  # Maps all our bytes to unicode strings, avoiding control tokens of the BPE (spaces in our case)
-            bpe_tokens.extend(bpe_token for bpe_token in self.bpe(token).split(" "))
-        return bpe_tokens
-
     # Copied from transformers.models.gpt2.tokenization_gpt2.GPT2Tokenizer._convert_token_to_id with GPT2 -> Whisper
     def _convert_token_to_id(self, token):
         """Converts a token (str) in an id using the vocab."""
@@ -499,12 +495,35 @@ class WhisperTokenizer(PreTrainedTokenizer):
         """
         return self.decoder.get(index, "")
 
-    def _normalize(self, text):
-        warnings.warn(
-            "The private method `_normalize` is deprecated and will be removed in v5 of Transformers."
-            "You can normalize an input string using the Whisper English normalizer using the `normalize` method."
-        )
-        return self.normalize(text)
+    def _tokenize(self, text):
+        """
+        Tokenize a string with Senegal normalization applied first if enabled
+        """
+        # Apply Senegal normalization if enabled
+        if self.use_senegal_normalizer and hasattr(self, 'senegal_normalizer'):
+            text = self.senegal_normalizer(text)
+        
+        # Original tokenization logic
+        bpe_tokens = []
+        for token in re.findall(self.pat, text):
+            token = "".join(
+                self.byte_encoder[b] for b in token.encode("utf-8")
+            )
+            bpe_tokens.extend(bpe_token for bpe_token in self.bpe(token).split(" "))
+        return bpe_tokens
+
+    def normalize(self, text):
+        """
+        Normalize text using appropriate normalizer
+        """
+        # Use Senegal normalizer if enabled
+        if self.use_senegal_normalizer and hasattr(self, 'senegal_normalizer'):
+            return self.senegal_normalizer(text)
+        
+        # Otherwise use default English normalizer
+        normalizer = EnglishTextNormalizer(self.english_spelling_normalizer)
+        return normalizer(text)
+
 
     def _basic_normalize(self, text, remove_diacritics=False):
         warnings.warn(
@@ -513,13 +532,32 @@ class WhisperTokenizer(PreTrainedTokenizer):
         )
         return self.basic_normalize(text, remove_diacritics=remove_diacritics)
 
-    def normalize(self, text):
+    def senegal_normalize(self, text):
         """
-        Normalize a given string using the `EnglishTextNormalizer` class, which performs commons transformation on
-        english text.
+        Explicitly use Senegal normalization
+        
+        Args:
+            text (str): Text to normalize
+        
+        Returns:
+            str: Normalized text with Wolof/French numbers and Orange patterns
         """
-        normalizer = EnglishTextNormalizer(self.english_spelling_normalizer)
-        return normalizer(text)
+        if not hasattr(self, 'senegal_normalizer'):
+            self.senegal_normalizer = SenegalVoiceNormalizer()
+        
+        return self.senegal_normalizer(text)
+
+    def set_senegal_normalizer(self, enable: bool = True):
+        """
+        Enable or disable the Senegal Voice Normalizer
+        
+        Args:
+            enable (bool): Whether to enable the Senegal normalizer
+        """
+        self.use_senegal_normalizer = enable
+        if enable and not hasattr(self, 'senegal_normalizer'):
+            self.senegal_normalizer = SenegalVoiceNormalizer()
+
 
     @staticmethod
     def basic_normalize(text, remove_diacritics=False):
